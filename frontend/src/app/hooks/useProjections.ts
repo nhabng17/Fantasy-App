@@ -10,7 +10,21 @@ import type {
 } from "../types";
 
 const API_BASE = "/api";
-const WS_URL = "ws://localhost:8000/api/ws/projections";
+
+function getWsUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    const url = new URL(process.env.NEXT_PUBLIC_API_URL);
+    const protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${url.host}/api/ws/projections`;
+  }
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/api/ws/projections`;
+  }
+  return "ws://localhost:8000/api/ws/projections";
+}
+
+const WS_URL = getWsUrl();
 
 export function useProjections() {
   const [projections, setProjections] = useState<PlayerProjection[]>([]);
