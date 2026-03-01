@@ -7,16 +7,17 @@ A div.lineup__status.is-confirmed indicates the lineup is confirmed.
 """
 
 import logging
+import unicodedata
 from datetime import datetime, date
 
 import httpx
 from bs4 import BeautifulSoup
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, and_
 from sqlalchemy.dialects.sqlite import insert
 
 from app.config import SCRAPE_HEADERS
 from app.database import async_session
-from app.models import StartingLineup
+from app.models import StartingLineup, InjuryReport, Player
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ async def fetch_and_store_lineups() -> list[dict]:
         if not lineups:
             logger.warning("No lineups scraped from Rotowire")
             return []
+
+        lineups = await _validate_lineups(lineups)
 
         today = date.today()
 
@@ -134,6 +137,115 @@ async def _scrape_rotowire_lineups() -> list[dict]:
                 lineups.append(lineup)
 
     return lineups
+
+
+_NAME_SUFFIXES = {"jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "v"}
+_POSITIONS = ("PG", "SG", "SF", "PF", "C")
+
+
+def _normalize_name(name: str) -> str:
+    """Transliterate diacritics to ASCII and strip suffixes for matching."""
+    ascii_name = "".join(
+        c for c in unicodedata.normalize("NFKD", name)
+        if unicodedata.category(c) != "Mn"
+    )
+    parts = [p for p in ascii_name.lower().split() if p not in _NAME_SUFFIXES]
+    return " ".join(parts)
+
+
+def _lookup_injury(
+    injury_lookup: dict[tuple[str, str], InjuryReport],
+    player_name: str,
+    team: str,
+) -> InjuryReport | None:
+    """Find an injury report by player name + team with normalized fallback."""
+    inj = injury_lookup.get((player_name.lower(), team))
+    if inj:
+        return inj
+    return injury_lookup.get((_normalize_name(player_name), team))
+
+
+async def _validate_lineups(lineups: list[dict]) -> list[dict]:
+    """Cross-reference lineups with injury reports and usual starters.
+
+    1. Remove Out/Doubtful players from lineup slots.
+    2. For unconfirmed lineups, replace non-usual starters with the healthy
+       usual starter when available (catches stale Rotowire data).
+    """
+    async with async_session() as session:
+        injuries_result = await session.execute(select(InjuryReport))
+        injury_lookup: dict[tuple[str, str], InjuryReport] = {}
+        for inj in injuries_result.scalars().all():
+            key = (inj.player_name.lower(), inj.team)
+            injury_lookup[key] = inj
+            norm_key = (_normalize_name(inj.player_name), inj.team)
+            if norm_key not in injury_lookup:
+                injury_lookup[norm_key] = inj
+
+        for lineup in lineups:
+            team = lineup["team"]
+
+            for pos in _POSITIONS:
+                player_name = lineup.get(pos, "")
+                if not player_name:
+                    continue
+
+                inj = _lookup_injury(injury_lookup, player_name, team)
+
+                if inj and inj.status in ("Out", "Doubtful"):
+                    logger.warning(
+                        "Removing %s from %s %s lineup — %s (%s)",
+                        player_name, team, pos, inj.status, inj.details,
+                    )
+                    replacement = await _find_healthy_usual_starter(
+                        session, team, pos, injury_lookup,
+                    )
+                    lineup[pos] = replacement or ""
+                    if replacement:
+                        logger.info(
+                            "Replaced with usual starter %s", replacement,
+                        )
+                    continue
+
+                if not lineup["confirmed"]:
+                    usual = await _find_healthy_usual_starter(
+                        session, team, pos, injury_lookup,
+                    )
+                    if usual and _normalize_name(usual) != _normalize_name(player_name):
+                        logger.warning(
+                            "Correcting %s %s: %s -> %s (usual starter is healthy)",
+                            team, pos, player_name, usual,
+                        )
+                        lineup[pos] = usual
+
+    return lineups
+
+
+async def _find_healthy_usual_starter(
+    session,
+    team: str,
+    position: str,
+    injury_lookup: dict[tuple[str, str], InjuryReport],
+) -> str | None:
+    """Return the name of the usual starter if they exist and are healthy."""
+    result = await session.execute(
+        select(Player).where(
+            and_(
+                Player.team == team,
+                Player.position == position,
+                Player.is_usual_starter == True,
+            )
+        )
+    )
+    usual = result.scalar_one_or_none()
+    if not usual:
+        return None
+
+    inj = _lookup_injury(injury_lookup, usual.name, team)
+    if inj and inj.status in ("Out", "Doubtful"):
+        return None
+
+    return usual.name
 
 
 async def get_todays_lineups() -> list[dict]:

@@ -6,6 +6,7 @@ players as high-value plays.
 """
 
 import logging
+import unicodedata
 from datetime import datetime, date
 
 from sqlalchemy import select, func, and_
@@ -13,7 +14,7 @@ from sqlalchemy.dialects.sqlite import insert
 
 from app.config import MIN_SALARY, MAX_VALUE_SALARY, USUAL_STARTER_THRESHOLD
 from app.database import async_session
-from app.models import Player, GameLog, StartingLineup, SpotStart
+from app.models import Player, GameLog, StartingLineup, SpotStart, InjuryReport
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,12 @@ async def detect_spot_starts() -> list[dict]:
         )
         lineups = lineups_result.scalars().all()
 
+        injuries_result = await session.execute(select(InjuryReport))
+        injury_set = set()
+        for inj in injuries_result.scalars().all():
+            if inj.status in ("Out", "Doubtful"):
+                injury_set.add((_normalize_name_ss(inj.player_name), inj.team))
+
         for lineup in lineups:
             positions_in_lineup = {
                 "PG": lineup.pg,
@@ -44,6 +51,13 @@ async def detect_spot_starts() -> list[dict]:
 
             for pos, player_name in positions_in_lineup.items():
                 if not player_name:
+                    continue
+
+                if (_normalize_name_ss(player_name), lineup.team) in injury_set:
+                    logger.info(
+                        "Skipping %s (%s) from spot start — Out/Doubtful",
+                        player_name, lineup.team,
+                    )
                     continue
 
                 player = await _find_player(session, player_name, lineup.team)
@@ -211,6 +225,19 @@ async def _project_spot_minutes(
         return round(max(projected, player_usual), 1)
 
     return round((player.avg_minutes or 15.0) * 1.5, 1)
+
+
+_NAME_SUFFIXES = {"jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "v"}
+
+
+def _normalize_name_ss(name: str) -> str:
+    """Transliterate diacritics to ASCII and strip suffixes for matching."""
+    ascii_name = "".join(
+        c for c in unicodedata.normalize("NFKD", name)
+        if unicodedata.category(c) != "Mn"
+    )
+    parts = [p for p in ascii_name.lower().split() if p not in _NAME_SUFFIXES]
+    return " ".join(parts)
 
 
 async def get_spot_starts_for_today() -> list[dict]:
