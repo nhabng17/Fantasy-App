@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, BackgroundTasks, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy import select, and_
 
 from app.config import POSITIONS
@@ -222,46 +222,13 @@ async def get_player_detail(player_id: int):
 
 
 @router.api_route("/refresh", methods=["GET", "POST"])
-async def manual_refresh():
-    """Manually trigger a full data refresh. Returns status of each step."""
-    from app.scheduler import (
-        refresh_injuries, refresh_lineups, refresh_nba_stats,
-        refresh_ownership, refresh_dk_salaries, _regenerate_projections,
-    )
-    import traceback
+async def manual_refresh(background_tasks: BackgroundTasks):
+    """Kick off a full data refresh in the background. Returns immediately."""
+    from app.scheduler import run_initial_fetch
 
-    results = {}
+    background_tasks.add_task(run_initial_fetch)
 
-    for name, fn in [
-        ("injuries", refresh_injuries),
-        ("lineups", refresh_lineups),
-        ("dk_salaries", refresh_dk_salaries),
-        ("nba_stats", refresh_nba_stats),
-        ("ownership", refresh_ownership),
-        ("projections", _regenerate_projections),
-    ]:
-        try:
-            await fn()
-            results[name] = "ok"
-        except Exception as e:
-            results[name] = f"error: {e}"
-
-    async with async_session() as session:
-        from sqlalchemy import func
-        player_count = (await session.execute(select(func.count(Player.id)))).scalar() or 0
-        proj_count = (await session.execute(select(func.count(Projection.id)))).scalar() or 0
-        injury_count = (await session.execute(select(func.count(InjuryReport.id)))).scalar() or 0
-        lineup_count = (await session.execute(select(func.count(StartingLineup.id)))).scalar() or 0
-
-    return {
-        "results": results,
-        "db_counts": {
-            "players": player_count,
-            "projections": proj_count,
-            "injuries": injury_count,
-            "lineups": lineup_count,
-        },
-    }
+    return {"status": "sync_started", "message": "Full data refresh started. Check /api/health to monitor progress."}
 
 
 @router.get("/health")

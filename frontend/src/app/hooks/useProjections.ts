@@ -145,6 +145,27 @@ export function useProjections() {
       setError(null);
       const res = await fetch(`${API_BASE}/refresh`, { method: "POST" });
       if (!res.ok) throw new Error("Sync failed");
+
+      const pollUntilDone = async () => {
+        let prevCount = 0;
+        let stableChecks = 0;
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 5000));
+          const healthRes = await fetch(`${API_BASE}/health`);
+          if (!healthRes.ok) continue;
+          const health = await healthRes.json();
+          const total = Object.values(health.db_counts as Record<string, number>).reduce((a, b) => a + b, 0);
+          if (total > 0 && total === prevCount) {
+            stableChecks++;
+            if (stableChecks >= 2) break;
+          } else {
+            stableChecks = 0;
+          }
+          prevCount = total;
+        }
+      };
+
+      await pollUntilDone();
       await fetchData();
     } catch {
       setError("Data sync failed. Check backend logs.");
