@@ -283,3 +283,40 @@ def _projection_to_dict(p: Projection) -> dict:
         "injury_status": p.injury_status or "",
         "last_updated": p.last_updated.isoformat() if p.last_updated else None,
     }
+
+
+@router.get("/debug/nba-test")
+async def debug_nba_test():
+    """Test if nba_api works from this server."""
+    import asyncio
+    import traceback
+
+    results = {}
+
+    try:
+        from nba_api.stats.endpoints import scoreboardv2
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        scoreboard = await asyncio.to_thread(scoreboardv2.ScoreboardV2, game_date=today)
+        games_df = scoreboard.get_data_frames()[0]
+        results["scoreboard"] = f"ok - {len(games_df)} games"
+    except Exception as e:
+        results["scoreboard"] = f"error: {e}\n{traceback.format_exc()}"
+
+    try:
+        from nba_api.stats.endpoints import commonteamroster
+        roster = await asyncio.to_thread(commonteamroster.CommonTeamRoster, team_id=1610612738, season="2025-26")
+        roster_df = roster.get_data_frames()[0]
+        results["roster"] = f"ok - {len(roster_df)} players"
+    except Exception as e:
+        results["roster"] = f"error: {e}\n{traceback.format_exc()}"
+
+    try:
+        from nba_api.stats.endpoints import playergamelog
+        log = await asyncio.to_thread(playergamelog.PlayerGameLog, player_id=203999, season="2025-26")
+        df = log.get_data_frames()[0]
+        results["gamelog"] = f"ok - {len(df)} games"
+    except Exception as e:
+        results["gamelog"] = f"error: {e}\n{traceback.format_exc()}"
+
+    return results
