@@ -12,19 +12,12 @@ import type {
 const API_BASE = "/api";
 
 function getWsUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    const url = new URL(process.env.NEXT_PUBLIC_API_URL);
-    const protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${url.host}/api/ws/projections`;
-  }
   if (typeof window !== "undefined") {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     return `${protocol}//${window.location.host}/api/ws/projections`;
   }
   return "ws://localhost:8000/api/ws/projections";
 }
-
-const WS_URL = getWsUrl();
 
 export function useProjections() {
   const [projections, setProjections] = useState<PlayerProjection[]>([]);
@@ -64,7 +57,7 @@ export function useProjections() {
   const connectWebSocket = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(getWsUrl());
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
