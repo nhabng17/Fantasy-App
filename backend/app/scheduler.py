@@ -127,25 +127,32 @@ async def _regenerate_projections():
         logger.error(f"Projection regeneration failed: {e}")
 
 
+async def _run_with_retries(name: str, fn, max_retries: int = 3, delay: int = 30):
+    """Run a fetch function with retries on failure."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            await fn()
+            logger.info(f"{name} succeeded on attempt {attempt}")
+            return
+        except Exception as e:
+            logger.error(f"{name} failed (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                logger.info(f"Retrying {name} in {delay}s...")
+                await asyncio.sleep(delay)
+    logger.error(f"{name} failed after {max_retries} attempts")
+
+
 async def run_initial_fetch():
-    """Run all data fetches immediately on startup (non-blocking)."""
+    """Run all data fetches immediately on startup with retries."""
     logger.info("=== Running initial data fetch ===")
 
-    # Injuries + lineups are fast, run them first
-    await refresh_injuries()
-    await refresh_lineups()
+    await _run_with_retries("injuries", refresh_injuries)
+    await _run_with_retries("lineups", refresh_lineups)
+    await _run_with_retries("dk_salaries", refresh_dk_salaries)
+    await _run_with_retries("nba_stats", refresh_nba_stats, max_retries=3, delay=60)
+    await _run_with_retries("ownership", refresh_ownership)
+    await _run_with_retries("depth_charts", refresh_depth_charts)
 
-    # DK salaries before stats so projections have salary data
-    await refresh_dk_salaries()
-
-    # NBA stats is slow (fetches all player logs), run it
-    await refresh_nba_stats()
-
-    # Ownership + depth after stats are loaded
-    await refresh_ownership()
-    await refresh_depth_charts()
-
-    # Final projection pass with all data
     await _regenerate_projections()
 
     logger.info("=== Initial data fetch complete ===")
