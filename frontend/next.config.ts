@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+const rawApiUrl = process.env.NEXT_PUBLIC_API_URL;
+const apiUrl = rawApiUrl && !rawApiUrl.startsWith("http") ? `https://${rawApiUrl}` : rawApiUrl;
 
 const nextConfig: NextConfig = {
   async rewrites() {
