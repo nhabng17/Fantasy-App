@@ -1,0 +1,145 @@
+"use client";
+
+import { useState, useEffect, useCallback, useRef } from "react";
+import type {
+  PlayerProjection,
+  SpotStartAlert,
+  InjuryEntry,
+  LineupEntry,
+  WSMessage,
+} from "../types";
+
+const API_BASE = "/api";
+const WS_URL = "ws://localhost:8000/api/ws/projections";
+
+export function useProjections() {
+  const [projections, setProjections] = useState<PlayerProjection[]>([]);
+  const [spotStarts, setSpotStarts] = useState<SpotStartAlert[]>([]);
+  const [injuries, setInjuries] = useState<InjuryEntry[]>([]);
+  const [lineups, setLineups] = useState<LineupEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [newAlert, setNewAlert] = useState<SpotStartAlert | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const [projRes, spotRes, injRes, lineupRes] = await Promise.all([
+        fetch(`${API_BASE}/projections?limit=100`),
+        fetch(`${API_BASE}/spot-starts`),
+        fetch(`${API_BASE}/injuries`),
+        fetch(`${API_BASE}/lineups`),
+      ]);
+
+      if (projRes.ok) setProjections(await projRes.json());
+      if (spotRes.ok) setSpotStarts(await spotRes.json());
+      if (injRes.ok) setInjuries(await injRes.json());
+      if (lineupRes.ok) setLineups(await lineupRes.json());
+
+      setLastUpdate(new Date());
+      setError(null);
+    } catch (err) {
+      setError("Failed to fetch data. Is the backend running?");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const message: WSMessage = JSON.parse(event.data);
+
+        switch (message.type) {
+          case "projections_update":
+            setProjections(
+              (message.data as { projections: PlayerProjection[] }).projections
+            );
+            setLastUpdate(new Date());
+            break;
+
+          case "spot_start_alert": {
+            const spot = message.data as unknown as SpotStartAlert;
+            setSpotStarts((prev) => {
+              const exists = prev.some(
+                (s) => s.player_name === spot.player_name
+              );
+              return exists
+                ? prev.map((s) =>
+                    s.player_name === spot.player_name ? spot : s
+                  )
+                : [spot, ...prev];
+            });
+            setNewAlert(spot);
+            setTimeout(() => setNewAlert(null), 10000);
+            break;
+          }
+
+          case "lineup_update": {
+            const lineup = message.data as unknown as LineupEntry;
+            setLineups((prev) => {
+              const exists = prev.some((l) => l.team === lineup.team);
+              return exists
+                ? prev.map((l) => (l.team === lineup.team ? lineup : l))
+                : [...prev, lineup];
+            });
+            break;
+          }
+
+          case "injury_update": {
+            const injury = message.data as unknown as InjuryEntry;
+            setInjuries((prev) => {
+              const exists = prev.some(
+                (i) => i.player_name === injury.player_name
+              );
+              return exists
+                ? prev.map((i) =>
+                    i.player_name === injury.player_name ? injury : i
+                  )
+                : [injury, ...prev];
+            });
+            break;
+          }
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    };
+
+    ws.onclose = () => {
+      setTimeout(connectWebSocket, 5000);
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    connectWebSocket();
+
+    return () => {
+      wsRef.current?.close();
+    };
+  }, [fetchData, connectWebSocket]);
+
+  return {
+    projections,
+    spotStarts,
+    injuries,
+    lineups,
+    loading,
+    error,
+    lastUpdate,
+    newAlert,
+    refresh: fetchData,
+  };
+}
