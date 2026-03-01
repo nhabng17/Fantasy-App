@@ -18,6 +18,8 @@ export default function Dashboard() {
     lastUpdate,
     newAlert,
     refresh,
+    syncing,
+    syncData,
   } = useProjections();
 
   return (
@@ -47,6 +49,13 @@ export default function Dashboard() {
                 })}
               </span>
             )}
+            <button
+              onClick={syncData}
+              disabled={syncing || loading}
+              className="px-4 py-2 rounded-lg bg-[var(--accent-green,#22c55e)] text-white text-sm font-medium hover:bg-[var(--accent-green,#22c55e)]/80 disabled:opacity-50 transition-colors"
+            >
+              {syncing ? "Syncing..." : "Sync Data"}
+            </button>
             <button
               onClick={refresh}
               disabled={loading}

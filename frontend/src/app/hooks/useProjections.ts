@@ -28,6 +28,7 @@ export function useProjections() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [newAlert, setNewAlert] = useState<SpotStartAlert | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   const fetchData = useCallback(async () => {
@@ -138,6 +139,20 @@ export function useProjections() {
     };
   }, [fetchData, connectWebSocket]);
 
+  const syncData = useCallback(async () => {
+    try {
+      setSyncing(true);
+      setError(null);
+      const res = await fetch(`${API_BASE}/refresh`, { method: "POST" });
+      if (!res.ok) throw new Error("Sync failed");
+      await fetchData();
+    } catch {
+      setError("Data sync failed. Check backend logs.");
+    } finally {
+      setSyncing(false);
+    }
+  }, [fetchData]);
+
   return {
     projections,
     spotStarts,
@@ -147,6 +162,8 @@ export function useProjections() {
     error,
     lastUpdate,
     newAlert,
+    syncing,
     refresh: fetchData,
+    syncData,
   };
 }

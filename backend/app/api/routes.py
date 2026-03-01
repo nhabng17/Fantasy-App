@@ -221,7 +221,7 @@ async def get_player_detail(player_id: int):
         }
 
 
-@router.post("/refresh")
+@router.api_route("/refresh", methods=["GET", "POST"])
 async def manual_refresh():
     """Manually trigger a full data refresh. Returns status of each step."""
     from app.scheduler import (
