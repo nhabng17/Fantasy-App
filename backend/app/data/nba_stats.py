@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import time
 from datetime import datetime, timedelta, date
 
 import pandas as pd
@@ -59,7 +58,7 @@ async def fetch_todays_games() -> list[dict]:
     """Get today's NBA games from the scoreboard."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
-        scoreboard = scoreboardv2.ScoreboardV2(game_date=today)
+        scoreboard = await asyncio.to_thread(scoreboardv2.ScoreboardV2, game_date=today)
         games_df = scoreboard.get_data_frames()[0]
 
         games = []
@@ -109,11 +108,12 @@ async def fetch_and_store_player_game_logs(
 
             logger.info(f"Fetching roster for {team_abbrev}...")
             try:
-                roster = commonteamroster.CommonTeamRoster(
-                    team_id=team_info["id"], season=season
+                roster = await asyncio.to_thread(
+                    commonteamroster.CommonTeamRoster,
+                    team_id=team_info["id"], season=season,
                 )
                 roster_df = roster.get_data_frames()[0]
-                time.sleep(NBA_API_DELAY)
+                await asyncio.sleep(NBA_API_DELAY)
             except Exception as e:
                 logger.warning(f"Failed to fetch roster for {team_abbrev}: {e}")
                 continue
@@ -142,7 +142,7 @@ async def fetch_and_store_player_game_logs(
                 nba_id = int(p_row["PLAYER_ID"])
                 logs_stored = await _fetch_player_logs(nba_id, season)
                 total_logs += logs_stored
-                time.sleep(NBA_API_DELAY)
+                await asyncio.sleep(NBA_API_DELAY)
 
             logger.info(f"  {team_abbrev}: {len(roster_df)} players processed")
 
@@ -154,7 +154,7 @@ async def fetch_and_store_player_game_logs(
 async def _fetch_player_logs(nba_id: int, season: str) -> int:
     """Fetch and store individual player game logs. Returns count of logs stored."""
     try:
-        log = playergamelog.PlayerGameLog(player_id=nba_id, season=season)
+        log = await asyncio.to_thread(playergamelog.PlayerGameLog, player_id=nba_id, season=season)
         df = log.get_data_frames()[0]
         if df.empty:
             return 0
