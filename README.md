@@ -18,7 +18,7 @@ DraftKings fantasy basketball projection tool with real-time lineup tracking, Dv
 - **Database**: SQLite
 - **Real-time**: WebSockets
 
-## Quick Start
+## Quick Start (Local)
 
 ### Backend
 
@@ -40,6 +40,43 @@ npm run dev
 
 Open http://localhost:3000 to view the dashboard. The frontend proxies API requests to the backend on port 8000.
 
+## Deploy to Railway
+
+This project is configured for deployment on [Railway](https://railway.app) as two services in one project.
+
+### 1. Create a Railway project
+
+Sign up at [railway.app](https://railway.app) with GitHub and create a new project from your repo.
+
+### 2. Backend service
+
+- Set **Root Directory** to `backend`
+- Railway auto-detects Python and uses the included `Procfile`
+- Go to **Networking** → **Generate Domain** to get a public URL
+- Add these **Variables**:
+  - `ALLOWED_ORIGINS` — your frontend Railway URL (e.g. `https://your-frontend.up.railway.app`)
+  - `DATABASE_URL` *(optional)* — defaults to local SQLite; set to `sqlite+aiosqlite:////data/fantasy.db` if using a Railway Volume for persistent storage
+
+### 3. Frontend service
+
+- Click **New** → **GitHub Repo** → select the same repo
+- Set **Root Directory** to `frontend`
+- Go to **Networking** → **Generate Domain**
+- Add these **Variables**:
+  - `NEXT_PUBLIC_API_URL` — your backend Railway URL (e.g. `https://your-backend.up.railway.app`)
+
+### 4. Persistent storage (recommended)
+
+By default, Railway's filesystem resets on each deploy. To persist the database:
+
+1. Go to the backend service → **New** → **Volume**
+2. Set **Mount Path** to `/data`
+3. Set the `DATABASE_URL` variable to `sqlite+aiosqlite:////data/fantasy.db`
+
+### 5. Initial data sync
+
+After both services deploy, click the **Sync Data** button in the UI header to trigger a full data fetch from all sources. This takes a few minutes.
+
 ## API Endpoints
 
 | Endpoint | Description |
@@ -50,7 +87,17 @@ Open http://localhost:3000 to view the dashboard. The frontend proxies API reque
 | `GET /api/lineups` | Today's starting lineups |
 | `GET /api/spot-starts` | Spot start alerts sorted by value |
 | `GET /api/players/{id}` | Detailed player breakdown |
+| `GET\|POST /api/refresh` | Trigger a full data refresh from all sources |
+| `GET /api/health` | Health check with database record counts |
 | `WS /api/ws/projections` | Real-time updates |
+
+## Environment Variables
+
+| Variable | Service | Description |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | Frontend | Backend URL for API proxying (default: `http://localhost:8000`) |
+| `ALLOWED_ORIGINS` | Backend | Comma-separated CORS origins (default: `http://localhost:3000`) |
+| `DATABASE_URL` | Backend | SQLAlchemy database URL (default: local `fantasy.db`) |
 
 ## Data Refresh Schedule
 
