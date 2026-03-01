@@ -12,12 +12,12 @@ from datetime import datetime, date
 
 import httpx
 from bs4 import BeautifulSoup
-from sqlalchemy import select, delete, and_
+from sqlalchemy import select, delete, and_, func
 from sqlalchemy.dialects.sqlite import insert
 
 from app.config import SCRAPE_HEADERS
 from app.database import async_session
-from app.models import StartingLineup, InjuryReport, Player
+from app.models import StartingLineup, InjuryReport, Player, GameLog
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,14 @@ async def _scrape_rotowire_lineups() -> list[dict]:
 _NAME_SUFFIXES = {"jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "v"}
 _POSITIONS = ("PG", "SG", "SF", "PF", "C")
 
+ADJACENT_POSITIONS: dict[str, list[str]] = {
+    "PG": ["SG"],
+    "SG": ["PG", "SF"],
+    "SF": ["SG", "PF"],
+    "PF": ["SF", "C"],
+    "C": ["PF"],
+}
+
 
 def _normalize_name(name: str) -> str:
     """Transliterate diacritics to ASCII and strip suffixes for matching."""
@@ -153,16 +161,53 @@ def _normalize_name(name: str) -> str:
     return " ".join(parts)
 
 
+def _name_variants(name: str) -> set[str]:
+    """Generate all matchable forms of a player name.
+
+    Handles full names, abbreviated first names, suffix stripping, and
+    diacritics so that "M. Plumlee" matches "Mason Plumlee" and vice versa.
+    """
+    variants = set()
+    lower = name.lower().strip()
+    variants.add(lower)
+    variants.add(_normalize_name(name))
+
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        first = parts[0].rstrip(".")
+        rest_parts = [p for p in parts[1:] if p.lower().rstrip(".") not in _NAME_SUFFIXES]
+        rest = " ".join(rest_parts).lower()
+
+        if len(first) > 1:
+            variants.add(f"{first[0].lower()}. {rest}")
+        if len(first) == 1:
+            variants.add(f"{first.lower()}. {rest}")
+
+    return variants
+
+
+def _build_injury_lookup(
+    injuries: list[InjuryReport],
+) -> dict[tuple[str, str], InjuryReport]:
+    """Build a lookup keyed on every name variant + team."""
+    lookup: dict[tuple[str, str], InjuryReport] = {}
+    for inj in injuries:
+        for variant in _name_variants(inj.player_name):
+            lookup.setdefault((variant, inj.team), inj)
+    return lookup
+
+
 def _lookup_injury(
     injury_lookup: dict[tuple[str, str], InjuryReport],
     player_name: str,
     team: str,
 ) -> InjuryReport | None:
-    """Find an injury report by player name + team with normalized fallback."""
-    inj = injury_lookup.get((player_name.lower(), team))
-    if inj:
-        return inj
-    return injury_lookup.get((_normalize_name(player_name), team))
+    """Find an injury report by trying every name variant against the lookup."""
+    for variant in _name_variants(player_name):
+        inj = injury_lookup.get((variant, team))
+        if inj:
+            return inj
+    return None
 
 
 async def _validate_lineups(lineups: list[dict]) -> list[dict]:
@@ -174,13 +219,7 @@ async def _validate_lineups(lineups: list[dict]) -> list[dict]:
     """
     async with async_session() as session:
         injuries_result = await session.execute(select(InjuryReport))
-        injury_lookup: dict[tuple[str, str], InjuryReport] = {}
-        for inj in injuries_result.scalars().all():
-            key = (inj.player_name.lower(), inj.team)
-            injury_lookup[key] = inj
-            norm_key = (_normalize_name(inj.player_name), inj.team)
-            if norm_key not in injury_lookup:
-                injury_lookup[norm_key] = inj
+        injury_lookup = _build_injury_lookup(injuries_result.scalars().all())
 
         for lineup in lineups:
             team = lineup["team"]
@@ -197,18 +236,16 @@ async def _validate_lineups(lineups: list[dict]) -> list[dict]:
                         "Removing %s from %s %s lineup — %s (%s)",
                         player_name, team, pos, inj.status, inj.details,
                     )
-                    replacement = await _find_healthy_usual_starter(
+                    replacement = await _find_best_healthy_starter(
                         session, team, pos, injury_lookup,
                     )
                     lineup[pos] = replacement or ""
                     if replacement:
-                        logger.info(
-                            "Replaced with usual starter %s", replacement,
-                        )
+                        logger.info("Replaced with %s", replacement)
                     continue
 
                 if not lineup["confirmed"]:
-                    usual = await _find_healthy_usual_starter(
+                    usual = await _find_best_healthy_starter(
                         session, team, pos, injury_lookup,
                     )
                     if usual and _normalize_name(usual) != _normalize_name(player_name):
@@ -218,34 +255,101 @@ async def _validate_lineups(lineups: list[dict]) -> list[dict]:
                         )
                         lineup[pos] = usual
 
+        await _resolve_abbreviated_names(session, lineups)
+
     return lineups
 
 
-async def _find_healthy_usual_starter(
+async def _resolve_abbreviated_names(
+    session, lineups: list[dict],
+) -> None:
+    """Replace abbreviated Rotowire names (e.g. 'D. Clingan') with canonical
+    Player names ('Donovan Clingan') so downstream matching is consistent."""
+    for lineup in lineups:
+        team = lineup["team"]
+        for pos in _POSITIONS:
+            name = lineup.get(pos, "")
+            if not name:
+                continue
+
+            result = await session.execute(
+                select(Player).where(
+                    and_(Player.team == team, Player.name == name)
+                )
+            )
+            if result.scalar_one_or_none():
+                continue
+
+            parts = name.strip().split()
+            if len(parts) >= 2 and len(parts[0].rstrip(".")) == 1:
+                initial = parts[0].rstrip(".").upper()
+                last = " ".join(parts[1:])
+                result = await session.execute(
+                    select(Player).where(
+                        and_(
+                            Player.team == team,
+                            Player.name.like(f"{initial}%{last}"),
+                        )
+                    )
+                )
+                match = result.scalar_one_or_none()
+                if match:
+                    logger.debug("Resolved %s -> %s", name, match.name)
+                    lineup[pos] = match.name
+
+
+async def _find_best_healthy_starter(
     session,
     team: str,
     position: str,
     injury_lookup: dict[tuple[str, str], InjuryReport],
 ) -> str | None:
-    """Return the name of the usual starter if they exist and are healthy."""
-    result = await session.execute(
-        select(Player).where(
-            and_(
-                Player.team == team,
-                Player.position == position,
-                Player.is_usual_starter == True,
+    """Find the best healthy starter for a team/position.
+
+    Search order:
+    1. Flagged usual starter at exact position
+    2. Flagged usual starter at adjacent positions (PF<->C, PG<->SG, etc.)
+    3. Player at exact position with the most starts in recent games
+    """
+    positions_to_check = [position] + ADJACENT_POSITIONS.get(position, [])
+
+    for pos in positions_to_check:
+        result = await session.execute(
+            select(Player).where(
+                and_(
+                    Player.team == team,
+                    Player.position == pos,
+                    Player.is_usual_starter == True,
+                )
             )
         )
+        for player in result.scalars().all():
+            inj = _lookup_injury(injury_lookup, player.name, team)
+            if not inj or inj.status not in ("Out", "Doubtful"):
+                return player.name
+
+    all_positions = set(positions_to_check + [position])
+    most_starts = await session.execute(
+        select(Player.name, func.count(GameLog.id).label("start_count"))
+        .join(GameLog, GameLog.player_id == Player.id)
+        .where(
+            and_(
+                Player.team == team,
+                Player.position.in_(all_positions),
+                GameLog.started == True,
+            )
+        )
+        .group_by(Player.id)
+        .order_by(func.count(GameLog.id).desc())
+        .limit(5)
     )
-    usual = result.scalar_one_or_none()
-    if not usual:
-        return None
+    for row in most_starts:
+        name, _ = row
+        inj = _lookup_injury(injury_lookup, name, team)
+        if not inj or inj.status not in ("Out", "Doubtful"):
+            return name
 
-    inj = _lookup_injury(injury_lookup, usual.name, team)
-    if inj and inj.status in ("Out", "Doubtful"):
-        return None
-
-    return usual.name
+    return None
 
 
 async def get_todays_lineups() -> list[dict]:

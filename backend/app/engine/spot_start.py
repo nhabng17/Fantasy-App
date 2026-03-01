@@ -35,10 +35,11 @@ async def detect_spot_starts() -> list[dict]:
         lineups = lineups_result.scalars().all()
 
         injuries_result = await session.execute(select(InjuryReport))
-        injury_set = set()
+        injury_set: set[tuple[str, str]] = set()
         for inj in injuries_result.scalars().all():
             if inj.status in ("Out", "Doubtful"):
-                injury_set.add((_normalize_name_ss(inj.player_name), inj.team))
+                for variant in _name_variants_ss(inj.player_name):
+                    injury_set.add((variant, inj.team))
 
         for lineup in lineups:
             positions_in_lineup = {
@@ -53,7 +54,8 @@ async def detect_spot_starts() -> list[dict]:
                 if not player_name:
                     continue
 
-                if (_normalize_name_ss(player_name), lineup.team) in injury_set:
+                player_variants = _name_variants_ss(player_name)
+                if any((v, lineup.team) in injury_set for v in player_variants):
                     logger.info(
                         "Skipping %s (%s) from spot start — Out/Doubtful",
                         player_name, lineup.team,
@@ -238,6 +240,27 @@ def _normalize_name_ss(name: str) -> str:
     )
     parts = [p for p in ascii_name.lower().split() if p not in _NAME_SUFFIXES]
     return " ".join(parts)
+
+
+def _name_variants_ss(name: str) -> set[str]:
+    """Generate all matchable forms of a player name."""
+    variants = set()
+    lower = name.lower().strip()
+    variants.add(lower)
+    variants.add(_normalize_name_ss(name))
+
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        first = parts[0].rstrip(".")
+        rest_parts = [p for p in parts[1:] if p.lower().rstrip(".") not in _NAME_SUFFIXES]
+        rest = " ".join(rest_parts).lower()
+
+        if len(first) > 1:
+            variants.add(f"{first[0].lower()}. {rest}")
+        if len(first) == 1:
+            variants.add(f"{first.lower()}. {rest}")
+
+    return variants
 
 
 async def get_spot_starts_for_today() -> list[dict]:
